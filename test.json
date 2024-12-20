@@ -1,0 +1,13 @@
+{
+    "symbol": "NQ DEC24",
+    "target": [
+        "SHORT",
+        "0"
+    ],
+    "bars": [
+        {}
+    ],
+    "indicators": [
+        {}
+    ]
+}

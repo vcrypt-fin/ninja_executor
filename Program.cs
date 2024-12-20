@@ -1,9 +1,12 @@
-﻿using NinjaTrader.Client;
+﻿using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.DependencyInjection;
 using System;
-using System.Net;
-using System.IO;
-using System.Text;
 using System.Text.Json;
+using NinjaTrader.Client;
+using System.Threading.Tasks;
 
 namespace NinjaTraderConsoleApp
 {
@@ -22,29 +25,32 @@ namespace NinjaTraderConsoleApp
         private static Client? myClient;
         private static string account = "Sim101";
         private static readonly int port = 8003;
-        private static HttpListener? _listener;
 
-        static void Main(string[] args)
+        static async Task Main(string[] args)
         {
             try
             {
+                // Initialize NinjaTrader Client
                 myClient = new Client();
                 if (myClient == null) throw new InvalidOperationException("Failed to create NinjaTrader client");
 
                 int connect = myClient.Connected(1);
                 Console.WriteLine($"{DateTime.Now} | Connected: {connect}");
 
-                Console.CancelKeyPress += (s, e) => {
+                // Handle graceful shutdown
+                using IHost host = CreateHostBuilder(args).Build();
+
+                // Register a callback to handle Ctrl+C
+                Console.CancelKeyPress += (s, e) =>
+                {
                     e.Cancel = true;
-                    Stop();
-                    Environment.Exit(0);
+                    Console.WriteLine("Shutting down...");
+                    host.StopAsync().Wait();
                 };
 
-                StartServer();
+                Console.WriteLine("Server started. Press Ctrl+C to shut down.");
 
-                // Keep the application running
-                Console.WriteLine("Press Ctrl+C to exit...");
-                while (true) Thread.Sleep(1000);
+                await host.RunAsync();
             }
             catch (Exception ex)
             {
@@ -52,147 +58,142 @@ namespace NinjaTraderConsoleApp
             }
         }
 
-        static void StartServer()
-        {
-            _listener = new HttpListener();
-            _listener.Prefixes.Add($"http://localhost:{port}/");
-            _listener.Start();
-            Console.WriteLine($"Server started on port {port}");
-            Receive();
-        }
-
-        static public void Stop()
-        {
-            _listener?.Stop();
-            Console.WriteLine("Server stopped.");
-        }
-
-        static private void Receive()
-        {
-            _listener?.BeginGetContext(new AsyncCallback(ListenerCallback), _listener);
-        }
-
-        private static async void ListenerCallback(IAsyncResult result)
-        {
-            if (_listener?.IsListening != true) return;
-
-            try
-            {
-                var context = _listener.EndGetContext(result);
-                var request = context.Request;
-                var response = context.Response;
-
-                if (request.Url?.AbsolutePath == "/set_target" && request.HttpMethod == "POST")
+        public static IHostBuilder CreateHostBuilder(string[] args) =>
+            Host.CreateDefaultBuilder(args)
+                .ConfigureWebHostDefaults(webBuilder =>
                 {
-                    using var reader = new StreamReader(request.InputStream);
-                    var body = await reader.ReadToEndAsync();
-                    Console.WriteLine($"Received body: {body}");
-
-                    try
+                    webBuilder.UseKestrel(options =>
                     {
-                        var options = new JsonSerializerOptions
-                        {
-                            PropertyNameCaseInsensitive = true,
-                            AllowTrailingCommas = true
-                        };
-
-                        var order = JsonSerializer.Deserialize<OrderRequest>(body, options);
-                        if (order == null)
-                        {
-                            SendJsonResponse(response, new { success = false, message = "Failed to parse order request" });
-                            return;
-                        }
-
-                        Console.WriteLine($"Order received: Symbol={order.Symbol}, Target={string.Join(",", order.Target ?? Array.Empty<string>())}");
-
-                        if (string.IsNullOrEmpty(order.Symbol))
-                        {
-                            SendJsonResponse(response, new { success = false, message = "Symbol is required" });
-                            return;
-                        }
-
-                        if (order.Target == null || order.Target.Length != 2)
-                        {
-                            SendJsonResponse(response, new { success = false, message = "Target must be an array with 2 elements" });
-                            return;
-                        }
-
-                        string? action = order.Target[0]?.ToUpperInvariant();
-                        string? quantityStr = order.Target[1];
-
-                        if (string.IsNullOrEmpty(action) || string.IsNullOrEmpty(quantityStr))
-                        {
-                            SendJsonResponse(response, new { success = false, message = "Invalid target values" });
-                            return;
-                        }
-
-                        if (!int.TryParse(quantityStr, out int quantity) || quantity < 0)
-                        {
-                            SendJsonResponse(response, new { success = false, message = "Invalid quantity value" });
-                            return;
-                        }
-
-                        if (action != "LONG" && action != "SHORT")
-                        {
-                            SendJsonResponse(response, new { success = false, message = "Action must be LONG or SHORT" });
-                            return;
-                        }
-
-                        // Convert LONG/SHORT to BUY/SELL
-                        string ntAction = action == "LONG" ? "BUY" : "SELL";
-
-                        Console.WriteLine($"Executing order: {ntAction} {quantity} {order.Symbol}");
-
-                        ZeroPosition(order.Symbol);
-                        PlaceOrder(ntAction, quantity, order.Symbol);
-
-                        SendJsonResponse(response, new { success = true, message = "Order placed" });
-                    }
-                    catch (JsonException ex)
+                        // Configure Kestrel to listen on any IP address at the specified port
+                        options.ListenAnyIP(port);
+                        // To restrict to specific IPs, use options.Listen(IPAddress.Parse("192.168.1.100"), port);
+                    });
+                    webBuilder.Configure(app =>
                     {
-                        Console.WriteLine($"JSON parsing error: {ex.Message}");
-                        SendJsonResponse(response, new { success = false, message = "Invalid JSON format" });
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"Error processing order: {ex.Message}");
-                        SendJsonResponse(response, new { success = false, message = "Internal server error" });
-                    }
-                }
-                else
-                {
-                    SendJsonResponse(response, new { success = false, message = "Invalid endpoint or method" });
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error processing request: {ex}");
-            }
-            finally
-            {
-                Receive(); // Continue listening
-            }
-        }
+                        app.UseRouting();
 
-        private static void SendJsonResponse(HttpListenerResponse response, object content)
+                        app.UseEndpoints(endpoints =>
+                        {
+                            endpoints.MapPost("/set_target", async context =>
+                            {
+                                try
+                                {
+                                    // Deserialize the incoming JSON request
+                                    var order = await JsonSerializer.DeserializeAsync<OrderRequest>(context.Request.Body, new JsonSerializerOptions
+                                    {
+                                        PropertyNameCaseInsensitive = true,
+                                        AllowTrailingCommas = true
+                                    });
+
+                                    if (order == null)
+                                    {
+                                        context.Response.StatusCode = 400; // Bad Request
+                                        await context.Response.WriteAsJsonAsync(new { success = false, message = "Failed to parse order request" });
+                                        return;
+                                    }
+
+                                    Console.WriteLine($"Order received: Symbol={order.Symbol}, Target={string.Join(",", order.Target ?? Array.Empty<string>())}");
+
+                                    // Validate the order
+                                    var validationResult = ValidateOrder(order);
+                                    if (!validationResult.IsValid)
+                                    {
+                                        context.Response.StatusCode = 400; // Bad Request
+                                        await context.Response.WriteAsJsonAsync(new { success = false, message = validationResult.Message });
+                                        return;
+                                    }
+
+                                    // Process the order
+                                    string ntAction = order.Target[0].ToUpperInvariant() == "LONG" ? "BUY" : "SELL";
+                                    int quantity = int.Parse(order.Target[1]);
+
+                                    Console.WriteLine($"Executing order: {ntAction} {quantity} {order.Symbol}");
+
+                                    ZeroPosition(order.Symbol);
+                                    PlaceOrder(ntAction, quantity, order.Symbol);
+
+                                    // Respond with success
+                                    await context.Response.WriteAsJsonAsync(new { success = true, message = "Order placed" });
+                                }
+                                catch (JsonException ex)
+                                {
+                                    Console.WriteLine($"JSON parsing error: {ex.Message}");
+                                    context.Response.StatusCode = 400; // Bad Request
+                                    await context.Response.WriteAsJsonAsync(new { success = false, message = "Invalid JSON format" });
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"Error processing order: {ex.Message}");
+                                    context.Response.StatusCode = 500; // Internal Server Error
+                                    await context.Response.WriteAsJsonAsync(new { success = false, message = "Internal server error" });
+                                }
+                            });
+
+                            // Optional: Health Check or Default Route
+                            endpoints.MapGet("/", async context =>
+                            {
+                                await context.Response.WriteAsync("NinjaTrader Console App is running.");
+                            });
+                        });
+                    });
+                });
+
+        /// <summary>
+        /// Validates the incoming order request.
+        /// </summary>
+        /// <param name="order">The order request to validate.</param>
+        /// <returns>A tuple indicating whether the order is valid and an accompanying message.</returns>
+        private static (bool IsValid, string Message) ValidateOrder(OrderRequest order)
         {
-            try
+            if (string.IsNullOrEmpty(order.Symbol))
             {
-                var json = JsonSerializer.Serialize(content);
-                var buffer = Encoding.UTF8.GetBytes(json);
+                return (false, "Symbol is required");
+            }
 
-                response.ContentType = "application/json";
-                response.ContentLength64 = buffer.Length;
-                response.OutputStream.Write(buffer, 0, buffer.Length);
-                response.OutputStream.Close();
-            }
-            catch (Exception ex)
+            if (order.Target == null || order.Target.Length != 2)
             {
-                Console.WriteLine($"Error sending response: {ex.Message}");
+                return (false, "Target must be an array with 2 elements");
             }
+
+            string? action = order.Target[0]?.ToUpperInvariant();
+            string? quantityStr = order.Target[1];
+
+            if (string.IsNullOrEmpty(action) || string.IsNullOrEmpty(quantityStr))
+            {
+                return (false, "Invalid target values");
+            }
+
+            if (!int.TryParse(quantityStr, out int quantity) || quantity < 0)
+            {
+                return (false, "Invalid quantity value");
+            }
+
+            if (action != "LONG" && action != "SHORT")
+            {
+                return (false, "Action must be LONG or SHORT");
+            }
+
+            return (true, "Valid");
         }
 
-        static void PlaceOrder(string action = "SELL", int quantity = 1, string symbol = "")
+        /// <summary>
+        /// Sends a JSON response to the client.
+        /// </summary>
+        /// <param name="context">The HTTP context.</param>
+        /// <param name="content">The content to serialize as JSON.</param>
+        private static async Task SendJsonResponse(HttpContext context, object content)
+        {
+            context.Response.ContentType = "application/json";
+            await context.Response.WriteAsJsonAsync(content);
+        }
+
+        /// <summary>
+        /// Places an order using the NinjaTrader client.
+        /// </summary>
+        /// <param name="action">The action to perform (BUY/SELL).</param>
+        /// <param name="quantity">The quantity of the order.</param>
+        /// <param name="symbol">The symbol to trade.</param>
+        private static void PlaceOrder(string action = "SELL", int quantity = 1, string symbol = "")
         {
             if (myClient == null)
             {
@@ -231,7 +232,11 @@ namespace NinjaTraderConsoleApp
             }
         }
 
-        static void ZeroPosition(string symbol = "")
+        /// <summary>
+        /// Closes any existing positions for the given symbol.
+        /// </summary>
+        /// <param name="symbol">The symbol to close positions for.</param>
+        private static void ZeroPosition(string symbol = "")
         {
             if (myClient == null)
             {

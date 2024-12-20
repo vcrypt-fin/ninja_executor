@@ -9,6 +9,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Add ASP.NET Core packages -->
+    <PackageReference Include="Microsoft.AspNetCore.App" />
+    <!-- If needed, add other packages -->
+    <!-- Example: <PackageReference Include="Microsoft.Extensions.Hosting" Version="6.0.0" /> -->
+  </ItemGroup>
+
+  <ItemGroup>
     <Reference Include="NinjaTrader.Client">
       <HintPath>C:\Program Files (x86)\NinjaTrader 8\bin\NinjaTrader.Client.dll</HintPath>
       <Private>True</Private>
