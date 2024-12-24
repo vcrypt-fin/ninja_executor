@@ -64,9 +64,12 @@ namespace NinjaTraderConsoleApp
                 {
                     webBuilder.UseKestrel(options =>
                     {
-                        // Configure Kestrel to listen on any IP address at the specified port
-                        options.ListenAnyIP(port);
-                        // To restrict to specific IPs, use options.Listen(IPAddress.Parse("192.168.1.100"), port);
+                        // Configure Kestrel to listen on all network interfaces
+                        // This is important for Docker container networking
+                        options.ListenAnyIP(port, listenOptions =>
+                        {
+                            listenOptions.Protocols = Microsoft.AspNetCore.Server.Kestrel.Core.HttpProtocols.Http1;
+                        });
                     });
                     webBuilder.Configure(app =>
                     {
